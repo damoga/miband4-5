@@ -47,6 +47,34 @@ class Delegate(DefaultDelegate):
                 self.device._send_key()
             else:
                 self.device.state = AUTH_STATES.AUTH_FAILED
+        elif hnd == self.device._char_chunked_read.getHandle():
+            if len(data) > 1 and data[:1] == b'\x03':
+                sequence_number = struct.unpack('b', data[4:5])[0]
+                if sequence_number == 0 and data[9:14] == b'\x82\x00\x10\x04\x01':
+                    print("A")
+                    # this.reassembleBuffer_pointer = 0;
+                    header_size = 14
+                    # this.reassembleBuffer_expectedBytes = value[5] - 3;
+                elif sequence_number > 0:
+                    if sequence_number != self.device.last_sequence_number + 1:
+                        print("Unexpected sequence number")
+                        return
+                    header_size = 5
+                elif data[9:14] == b'\x82\x00\x10\x05\x01':
+                    print("Successfully authenticated")
+                    self.device.state = AUTH_STATES.AUTH_OK
+                    return
+                else:
+                    print("Unhandled characteristic change")
+                    return
+                bytes_to_copy = len(data) - header_size
+                self.device.reassemble_buffer[self.device.reassemble_buffer_pointer:self.device.reassemble_buffer_pointer+header_size] = bytes(data[0:header_size])
+                self.device.reassemble_buffer_pointer += bytes_to_copy
+                self.device.last_sequence_number = sequence_number
+                if self.device.reassemble_buffer_pointer == self.device.reassemble_buffer_expected_bytes:
+                    remote_random = self.device.reassemble_buffer[:16]
+                    remote_public_ec = self.device.reassemble_buffer[16:64]
+                    ...
         elif hnd == self.device._char_heart_measure.getHandle():
             self.device.queue.put((QUEUE_TYPES.HEART, data))
         elif hnd == 0x38:
@@ -174,6 +202,14 @@ class miband(Peripheral):
         self._char_auth = self.svc_2.getCharacteristics(UUIDS.CHARACTERISTIC_AUTH)[0]
         self._desc_auth = self._char_auth.getDescriptors(forUUID=UUIDS.NOTIFICATION_DESCRIPTOR)[0]
 
+        self._char_chunked_write = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_CHUNKED_TRANSFER_WRITE)[0]
+        self._char_chunked_read = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_CHUNKED_TRANSFER_READ)[0]
+        self.reassemble_buffer = bytes([0]*512)
+        self.reassemble_buffer_pointer = 0
+        self.reassemble_buffer_expected_bytes = 0
+        self.last_sequence_number = 0
+        self.handle = 0
+
         self._char_heart_ctrl = self.svc_heart.getCharacteristics(UUIDS.CHARACTERISTIC_HEART_RATE_CONTROL)[0]
         self._char_heart_measure = self.svc_heart.getCharacteristics(UUIDS.CHARACTERISTIC_HEART_RATE_MEASURE)[0]
         self._heart_measure_handle = self._char_heart_measure.getHandle() + 1
@@ -212,6 +248,10 @@ class miband(Peripheral):
     def generateAuthKey(self):
         if(self.authKey):
             return struct.pack('<18s',b'\x01\x00'+ self.auth_key)
+
+    def get_next_handle(self):
+        self.handle += 1
+        return self.handle - 1
 
 
     def _send_key(self):
