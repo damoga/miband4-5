@@ -142,6 +142,12 @@ def get_gyro_realtime():
 
 
 # Needs Auth
+def get_heart_and_gyro_realtime():
+    band.start_heart_and_gyro_realtime(heart_callback=heart_logger, gyro_callback=gyro_logger, sensitivity=1)
+    input('Press Enter to continue')
+
+
+# Needs Auth
 def restore_firmware():
     print("This feature has the potential to brick your Mi Band 4. You are doing this at your own risk.")
     path = input("Enter the path of the firmware file :")
@@ -235,6 +241,7 @@ if __name__ == "__main__":
     single_heart_rate_item = FunctionItem("@ Get Heart Rate", get_heart_rate)
     real_time_heart_rate_item = FunctionItem("@ Get realtime heart rate data", get_realtime)
     real_time_gyro_item = FunctionItem("@ Get realtime gyro data", get_gyro_realtime)
+    real_time_heart_and_gyro_item = FunctionItem("@ Get realtime heart and gyro data", get_heart_and_gyro_realtime)
     get_band_activity_data_item = FunctionItem("@ Get activity logs for a day", get_activity_logs)
     set_time_item= FunctionItem("@ Set the band's time to system time", set_time)
     update_watchface_item = FunctionItem("@ Update Watchface", update_watchface)
@@ -247,6 +254,7 @@ if __name__ == "__main__":
     menu.append_item(single_heart_rate_item)
     menu.append_item(real_time_heart_rate_item)
     menu.append_item(real_time_gyro_item)
+    menu.append_item(real_time_heart_and_gyro_item)
     menu.append_item(get_band_activity_data_item)
     menu.append_item(set_time_item)
     menu.append_item(set_music_item)

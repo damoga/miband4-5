@@ -64,6 +64,7 @@ class BYTEPATTERNS(object):
     vibration_stop_hex = 'ff0000000000'
 
     gyro_start_hex = '01{:02x}19'
+    gyro_start_hex_new = '01{:02x}00000019'
     start_hex = '0100'
     stop_hex = '0000'
 
@@ -95,6 +96,11 @@ class BYTEPATTERNS(object):
     def gyro_start(sensitivity):
         #sensitivity should be from 1 to 3
         byte_pattern = BYTEPATTERNS.gyro_start_hex
+        return bytes.fromhex(byte_pattern.format(sensitivity))
+
+    def gyro_start_new(sensitivity):
+        #sensitivity should be from 1 to 3
+        byte_pattern = BYTEPATTERNS.gyro_start_hex_new
         return bytes.fromhex(byte_pattern.format(sensitivity))
 
     start = bytes.fromhex(start_hex)

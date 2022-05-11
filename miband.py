@@ -1,3 +1,4 @@
+import json
 import sys,os,time,random
 import logging
 from bluepy.btle import Peripheral, DefaultDelegate, ADDR_TYPE_RANDOM,ADDR_TYPE_PUBLIC, BTLEException
@@ -54,8 +55,9 @@ class Delegate(DefaultDelegate):
                 self.device.queue.put((QUEUE_TYPES.RAW_GYRO, data))
             elif len(data) == 16:
                 self.device.queue.put((QUEUE_TYPES.RAW_HEART, data))
-        elif hnd == self.device._char_hz.getHandle():
-            if len(data) == 20 and struct.unpack('b', data[0:1])[0] == 1:
+        elif hnd == self.device._char_hz.getHandle():  # TODO: just in case
+            # print(len(data), data.hex())
+            if len(data) == 20 or len(data) == 14:  # and struct.unpack('b', data[0:1])[0] == 1:
                 self.device.queue.put((QUEUE_TYPES.RAW_GYRO, data))
             elif len(data) == 11:
                 #print("Unknown data: {}".format(bytes.hex(data, " ")))
@@ -341,7 +343,8 @@ class miband(Peripheral):
 
     def _parse_raw_gyro(self, bytes):
         gyro_raw_data_list = []
-        for i in range(2, 20, 6):
+        # len(bytes) is either 20 or 14
+        for i in range(2, len(bytes), 6):
             gyro_raw_data = struct.unpack("3h", bytes[i:(i+6)])
             gyro_dict = {
                 'gyro_raw_x': gyro_raw_data[0],
@@ -818,11 +821,12 @@ class miband(Peripheral):
     def send_gyro_start(self, sensitivity):
         if not self.gyro_started_flag:
             self._log.info("Starting gyro...")
+            self.write_req(self._steps_handle, BYTEPATTERNS.stop)
             self.write_req(self._sensor_handle, BYTEPATTERNS.start)
-            self.write_req(self._steps_handle, BYTEPATTERNS.start)
             self.write_req(self._hz_handle, BYTEPATTERNS.start)
             self.gyro_started_flag = True
         self.write_cmd(self._char_sensor, BYTEPATTERNS.gyro_start(sensitivity))
+        self.write_cmd(self._char_sensor, BYTEPATTERNS.gyro_start_new(sensitivity))
         self.write_req(self._sensor_handle, BYTEPATTERNS.stop)
         self.write_cmd(self._char_sensor, b'\x02')
 
@@ -839,9 +843,9 @@ class miband(Peripheral):
         self.write_cmd(self._char_heart_ctrl, BYTEPATTERNS.heart_measure_keepalive, response=True)
 
 
-    def start_heart_and_gyro_realtime(self, sensitivity, callback):
-        self.heart_measure_callback = callback
-        self.gyro_raw_callback = callback
+    def start_heart_and_gyro_realtime(self, sensitivity, heart_callback, gyro_callback):
+        self.heart_measure_callback = heart_callback
+        self.gyro_raw_callback = gyro_callback
 
         self.send_gyro_start(sensitivity)
         self.send_heart_measure_start()
@@ -851,6 +855,7 @@ class miband(Peripheral):
             self.wait_for_notifications_with_queued_writes(0.5)
             self._parse_queue()
             if (time.time() - heartbeat_time) >= 12:
+                print(json.dumps(self.get_steps(), indent=2))
                 heartbeat_time = time.time()
                 self.send_heart_measure_keepalive()
                 self.send_gyro_start(sensitivity)
@@ -867,7 +872,7 @@ class miband(Peripheral):
         while True:
             self.wait_for_notifications_with_queued_writes(0.5)
             self._parse_queue()
-            if (time.time() - heartbeat_time) >= 60:
+            if (time.time() - heartbeat_time) >= 20:
                 heartbeat_time = time.time()
                 self.send_gyro_start(sensitivity)
 
