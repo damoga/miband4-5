@@ -8,8 +8,6 @@ from constants import UUIDS, AUTH_STATES, ALERT_TYPES, QUEUE_TYPES, MUSICSTATE, 
 import struct
 from datetime import datetime, timedelta
 from Crypto.Cipher import AES
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import PublicFormat
 from datetime import datetime
 try:
     import zlib
@@ -59,7 +57,6 @@ class Delegate(DefaultDelegate):
             else:
                 self.device.state = AUTH_STATES.AUTH_FAILED
         elif hnd == self.device._char_chunked_read.getHandle():
-            print("HOLA")
             if len(data) > 1 and data[:1] == b'\x03':
                 sequence_number = struct.unpack('b', data[4:5])[0]
                 if sequence_number == 0 and data[9:14] == b'\x82\x00\x10\x04\x01':
@@ -94,15 +91,15 @@ class Delegate(DefaultDelegate):
 
                     self.device.encrypted_sequence_number = (sec[0] & 0xff) | ((sec[1] & 0xff) << 8) | ((sec[2] & 0xff) << 16) | ((sec[3] & 0xff) << 24)
 
-                    secret_key = bytes.fromhex(self.device.auth_key)
-                    final_shared_session_aes = []
+                    secret_key = self.device.auth_key
+                    final_shared_session_aes = bytearray([])
                     for i in range(16):
                         final_shared_session_aes.append(sec[i + 8] ^ secret_key[i])
 
                     self.device.shared_session_key = final_shared_session_aes
                     aes1 = AES.new(secret_key, AES.MODE_ECB)
                     out1 = aes1.encrypt(bytes(remote_random))
-                    aes2 = AES.new(final_shared_session_aes, AES.MODE_ECB)
+                    aes2 = AES.new(bytes(final_shared_session_aes), AES.MODE_ECB)
                     out2 = aes2.encrypt(bytes(remote_random))
 
                     if len(out1) == len(out2) == 16:
@@ -284,13 +281,12 @@ class miband(Peripheral):
         self._char_steps = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_STEPS)[0]
         self._steps_handle = self._char_steps.getHandle() + 1
 
-        print("----------------------------------------------")
         self._auth_notif(True)
         self.enable_music()
         self.activity_notif_enabled = False
         self.waitForNotifications(0.1)
         self.setDelegate(Delegate(self))
-        self._auth_init()  # TODO: HERE?
+        self._auth_init()
 
 
     def generateAuthKey(self):
@@ -332,7 +328,7 @@ class miband(Peripheral):
         ECDH.ecdh_generate_keys(ctypes.byref(self.public_key), ctypes.byref(self.private_key))
 
         auth = self.get_initial_auth_command(self.public_key)
-        print(auth)
+        # print(auth)
         self.write_chunked_miband6(self._char_chunked_write, 0x82, self.get_next_handle(), auth)
 
     def _auth_previews_data_notif(self, enabled):
@@ -749,7 +745,7 @@ class miband(Peripheral):
             chunk[header_size:] = data[len(data) - remaining : len(data) - remaining + copy_bytes]
 
             print('Writing chunk ', chunk)
-            char.write(chunk)  # TODO: I think withResponse is False, but we may need to wait for notification
+            char.write(chunk)
             # self.waitForNotification(0.5)
             remaining -= copy_bytes
             header_size = 5
