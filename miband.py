@@ -1,4 +1,6 @@
+import ctypes
 import json
+import secrets
 import sys,os,time,random
 import logging
 from bluepy.btle import Peripheral, DefaultDelegate, ADDR_TYPE_RANDOM,ADDR_TYPE_PUBLIC, BTLEException
@@ -6,6 +8,8 @@ from constants import UUIDS, AUTH_STATES, ALERT_TYPES, QUEUE_TYPES, MUSICSTATE, 
 import struct
 from datetime import datetime, timedelta
 from Crypto.Cipher import AES
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import PublicFormat
 from datetime import datetime
 try:
     import zlib
@@ -19,6 +23,13 @@ try:
     xrange
 except NameError:
     xrange = range
+
+# https://www.journaldev.com/31907/calling-c-functions-from-python
+tiny_ecdh_so_file = "./ecdh.so"
+ECDH = ctypes.CDLL(tiny_ecdh_so_file)
+
+ECC_PUB_KEY_SIZE = 48
+ECC_PRV_KEY_SIZE = 24
 
 
 class Delegate(DefaultDelegate):
@@ -48,13 +59,14 @@ class Delegate(DefaultDelegate):
             else:
                 self.device.state = AUTH_STATES.AUTH_FAILED
         elif hnd == self.device._char_chunked_read.getHandle():
+            print("HOLA")
             if len(data) > 1 and data[:1] == b'\x03':
                 sequence_number = struct.unpack('b', data[4:5])[0]
                 if sequence_number == 0 and data[9:14] == b'\x82\x00\x10\x04\x01':
                     print("A")
-                    # this.reassembleBuffer_pointer = 0;
+                    self.device.reassemble_buffer_pointer = 0
                     header_size = 14
-                    # this.reassembleBuffer_expectedBytes = value[5] - 3;
+                    self.device.reassemble_buffer_expected_bytes = data[5] - 3
                 elif sequence_number > 0:
                     if sequence_number != self.device.last_sequence_number + 1:
                         print("Unexpected sequence number")
@@ -68,13 +80,37 @@ class Delegate(DefaultDelegate):
                     print("Unhandled characteristic change")
                     return
                 bytes_to_copy = len(data) - header_size
-                self.device.reassemble_buffer[self.device.reassemble_buffer_pointer:self.device.reassemble_buffer_pointer+header_size] = bytes(data[0:header_size])
+                self.device.reassemble_buffer[self.device.reassemble_buffer_pointer:self.device.reassemble_buffer_pointer+len(data[header_size:])] = bytes(data[header_size:])
                 self.device.reassemble_buffer_pointer += bytes_to_copy
                 self.device.last_sequence_number = sequence_number
                 if self.device.reassemble_buffer_pointer == self.device.reassemble_buffer_expected_bytes:
                     remote_random = self.device.reassemble_buffer[:16]
                     remote_public_ec = self.device.reassemble_buffer[16:64]
-                    ...
+
+                    # ECDH
+                    rpub = (ctypes.c_uint8 * ECC_PUB_KEY_SIZE)(*bytes(remote_public_ec))
+                    sec = (ctypes.c_uint8 * ECC_PUB_KEY_SIZE)()
+                    ECDH.ecdh_shared_secret(self.device.private_key, rpub, sec)
+
+                    self.device.encrypted_sequence_number = (sec[0] & 0xff) | ((sec[1] & 0xff) << 8) | ((sec[2] & 0xff) << 16) | ((sec[3] & 0xff) << 24)
+
+                    secret_key = bytes.fromhex(self.device.auth_key)
+                    final_shared_session_aes = []
+                    for i in range(16):
+                        final_shared_session_aes.append(sec[i + 8] ^ secret_key[i])
+
+                    self.device.shared_session_key = final_shared_session_aes
+                    aes1 = AES.new(secret_key, AES.MODE_ECB)
+                    out1 = aes1.encrypt(bytes(remote_random))
+                    aes2 = AES.new(final_shared_session_aes, AES.MODE_ECB)
+                    out2 = aes2.encrypt(bytes(remote_random))
+
+                    if len(out1) == len(out2) == 16:
+                        command = b'\x05' + out1 + out2
+                        print("Sending 2nd auth part")
+                        self.device.write_chunked_miband6(self.device._char_chunked_write, 0x82,
+                                                          self.device.get_next_handle(), command)
+
         elif hnd == self.device._char_heart_measure.getHandle():
             self.device.queue.put((QUEUE_TYPES.HEART, data))
         elif hnd == 0x38:
@@ -202,13 +238,24 @@ class miband(Peripheral):
         self._char_auth = self.svc_2.getCharacteristics(UUIDS.CHARACTERISTIC_AUTH)[0]
         self._desc_auth = self._char_auth.getDescriptors(forUUID=UUIDS.NOTIFICATION_DESCRIPTOR)[0]
 
+        # Added for Mi Band 6 #########################################################################################
         self._char_chunked_write = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_CHUNKED_TRANSFER_WRITE)[0]
         self._char_chunked_read = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_CHUNKED_TRANSFER_READ)[0]
-        self.reassemble_buffer = bytes([0]*512)
+        self._desc_chunked_write = self._char_chunked_write.getDescriptors(forUUID=UUIDS.NOTIFICATION_DESCRIPTOR)[0]
+        self._desc_chunked_read = self._char_chunked_read.getDescriptors(forUUID=UUIDS.NOTIFICATION_DESCRIPTOR)[0]
+        self.reassemble_buffer = (ctypes.c_uint8 * 512)()
         self.reassemble_buffer_pointer = 0
         self.reassemble_buffer_expected_bytes = 0
         self.last_sequence_number = 0
         self.handle = 0
+
+        self.pub_buf = None
+        self.prv_buf = None
+        self.sec_buf = None
+        self.prv = None
+        self.pub = None
+        self.sec = None
+        ###############################################################################################################
 
         self._char_heart_ctrl = self.svc_heart.getCharacteristics(UUIDS.CHARACTERISTIC_HEART_RATE_CONTROL)[0]
         self._char_heart_measure = self.svc_heart.getCharacteristics(UUIDS.CHARACTERISTIC_HEART_RATE_MEASURE)[0]
@@ -237,12 +284,13 @@ class miband(Peripheral):
         self._char_steps = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_STEPS)[0]
         self._steps_handle = self._char_steps.getHandle() + 1
 
-
+        print("----------------------------------------------")
         self._auth_notif(True)
         self.enable_music()
         self.activity_notif_enabled = False
         self.waitForNotifications(0.1)
-        self.setDelegate( Delegate(self) )
+        self.setDelegate(Delegate(self))
+        self._auth_init()  # TODO: HERE?
 
 
     def generateAuthKey(self):
@@ -263,6 +311,10 @@ class miband(Peripheral):
     def _auth_notif(self, enabled):
         if enabled:
             self._log.info("Enabling Auth Service notifications status...")
+            # TODO: are these necessary?
+            # self._desc_chunked_write.write(b"\x01\x00", True)
+            self._desc_chunked_read.write(b"\x01\x00", True)
+
             self._desc_auth.write(b"\x01\x00", True)
         elif not enabled:
             self._log.info("Disabling Auth Service notifications status...")
@@ -270,6 +322,18 @@ class miband(Peripheral):
         else:
             self._log.error("Something went wrong while changing the Auth Service notifications status...")
 
+    def get_initial_auth_command(self, public_key):
+        return b'\x04\x02\x00\x02' + bytes(public_key)
+
+    def _auth_init(self):
+        # equivalent to crypto.getRandomValues(this.prv)
+        self.private_key = (ctypes.c_uint8 * ECC_PRV_KEY_SIZE)(*[secrets.randbits(8) for i in range(ECC_PRV_KEY_SIZE)])
+        self.public_key = (ctypes.c_uint8 * ECC_PUB_KEY_SIZE)()
+        ECDH.ecdh_generate_keys(ctypes.byref(self.public_key), ctypes.byref(self.private_key))
+
+        auth = self.get_initial_auth_command(self.public_key)
+        print(auth)
+        self.write_chunked_miband6(self._char_chunked_write, 0x82, self.get_next_handle(), auth)
 
     def _auth_previews_data_notif(self, enabled):
         if enabled:
@@ -285,9 +349,8 @@ class miband(Peripheral):
             self._desc_activity.write(b"\x00\x00", True)
             self.activity_notif_enabled = False
 
-
     def initialize(self):
-        self._req_rdn()
+        # self._req_rdn()
 
         while True:
             self.waitForNotifications(0.1)
@@ -653,6 +716,44 @@ class miband(Peripheral):
     def enable_music(self):
         self._desc_music_notif.write(b'\x01\x00')
 
+    def write_chunked_miband6(self, char, type, handle, data):
+        remaining = len(data)
+        count = 0
+        header_size = 11
+        mMTU = 23
+
+        while remaining > 0:
+            MAX_CHUNK_LENGTH = mMTU - 3 - header_size
+            copy_bytes = min(remaining, MAX_CHUNK_LENGTH)
+            chunk = bytearray(b'\x00\x00\x00\x00\x00')
+            flags = 0
+
+            if count == 0:
+                flags |= 0x01
+                chunk.append(len(data) & 0xff)
+                chunk.append((len(data) >> 8) & 0xff)
+                chunk.append((len(data) >> 16) & 0xff)
+                chunk.append((len(data) >> 24) & 0xff)
+                chunk.append(type & 0xff)
+                chunk.append((type >> 8) & 0xff)
+
+            if remaining <= MAX_CHUNK_LENGTH:
+                flags |= 0x06
+
+            chunk[0] = 0x03
+            chunk[1] = flags
+            chunk[2] = 0
+            chunk[3] = handle
+            chunk[4] = count
+
+            chunk[header_size:] = data[len(data) - remaining : len(data) - remaining + copy_bytes]
+
+            print('Writing chunk ', chunk)
+            char.write(chunk)  # TODO: I think withResponse is False, but we may need to wait for notification
+            # self.waitForNotification(0.5)
+            remaining -= copy_bytes
+            header_size = 5
+            count += 1
 
     def writeChunked(self,type,data):
         MAX_CHUNKLENGTH = 17
